@@ -405,7 +405,7 @@ ospf_ase_calculate_route (struct ospf *ospf, struct ospf_lsa * lsa)
       asbr.prefix = al->e[0].fwd_addr;
       asbr.prefixlen = IPV4_MAX_BITLEN;
 
-      rn = route_node_match (ospf->new_table, (struct prefix *) &asbr);
+      rn = route_node_match (ospf->new_table[0], (struct prefix *) &asbr);
       
       if (rn == NULL || (asbr_route = rn->info) == NULL)
 	{
@@ -451,7 +451,7 @@ ospf_ase_calculate_route (struct ospf *ospf, struct ospf_lsa * lsa)
 
   /* if there is a Intra/Inter area route to the N
      do not install external route */
-  if (rn = route_node_lookup (ospf->new_table,
+  if (rn = route_node_lookup (ospf->new_table[0],
 			      (struct prefix *) &p))
     {
       route_unlock_node(rn);
@@ -783,14 +783,13 @@ ospf_ase_incremental_update (struct ospf *ospf, struct ospf_lsa *lsa)
 
   /* if new_table is NULL, there was no spf calculation, thus
      incremental update is unneeded */
-  if (!ospf->new_table)
+  if (!ospf->new_table[0])
     return;
   
   /* If there is already an intra-area or inter-area route
      to the destination, no recalculation is necessary
      (internal routes take precedence). */
-  
-  rn = route_node_lookup (ospf->new_table, (struct prefix *) &p);
+  rn = route_node_lookup (ospf->new_table[0], (struct prefix *) &p);
   if (rn)
     {
       route_unlock_node (rn);

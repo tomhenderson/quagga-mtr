@@ -811,19 +811,14 @@ ospf_hello (struct ip *iph, struct ospf_header *ospfh,
 	       ospf_options_dump (hello->options));
 
   /* Compare options. */
-#define REJECT_IF_TBIT_ON	1 /* XXX */
-#ifdef REJECT_IF_TBIT_ON
-  if (CHECK_FLAG (hello->options, OSPF_OPTION_T))
+  if (!CHECK_FLAG (hello->options, OSPF_OPTION_MT)
+      && (oi->area->default_exclusion == OSPF_DEFAULT_EXCLUSION_ENABLE))
     {
-      /*
-       * This router does not support non-zero TOS.
-       * Drop this Hello packet not to establish neighbor relationship.
-       */
-      zlog_warn ("Packet %s [Hello:RECV]: T-bit on, drop it.",
+      /* RFC 4915, Section 4.3 */
+      zlog_warn ("Packet %s [Hello:RECV]: MT-bit off, drop it.",
 		 inet_ntoa (ospfh->router_id));
       return;
     }
-#endif /* REJECT_IF_TBIT_ON */
 
 #ifdef HAVE_OPAQUE_LSA
   if (CHECK_FLAG (oi->ospf->config, OSPF_OPAQUE_CAPABLE)
@@ -1167,17 +1162,16 @@ ospf_db_desc (struct ip *iph, struct ospf_header *ospfh,
       SET_FLAG (dd->options, OSPF_OPTION_NP);
     }
 
-#ifdef REJECT_IF_TBIT_ON
-  if (CHECK_FLAG (dd->options, OSPF_OPTION_T))
+  if (!CHECK_FLAG (dd->options, OSPF_OPTION_MT)
+      && (oi->area->default_exclusion == OSPF_DEFAULT_EXCLUSION_ENABLE))
     {
       /*
-       * In Hello protocol, optional capability must have checked
-       * to prevent this T-bit enabled router be my neighbor.
+       * Hello protocol should have prevented an adjacency under 
+       * these conditions
        */
-      zlog_warn ("Packet[DD]: Neighbor %s: T-bit on?", inet_ntoa (nbr->router_id));
+      zlog_warn ("Packet[DD]: Neighbor %s: MT-bit on?", inet_ntoa (nbr->router_id));
       return;
     }
-#endif /* REJECT_IF_TBIT_ON */
 
 #ifdef HAVE_OPAQUE_LSA
   if (CHECK_FLAG (dd->options, OSPF_OPTION_O)

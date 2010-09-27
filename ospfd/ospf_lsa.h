@@ -49,6 +49,7 @@
 
 #define OSPF_LSA_HEADER_SIZE	     20U
 #define OSPF_ROUTER_LSA_LINK_SIZE    12U
+#define OSPF_ROUTER_LSA_MTID_SIZE    4U
 #define OSPF_MAX_LSA_SIZE	   1500U
 
 /* AS-external-LSA refresh method. */
@@ -185,6 +186,29 @@ struct summary_lsa
   struct in_addr mask;
   u_char tos;
   u_char metric[3];
+};
+
+struct summary_mt
+{
+  u_char id;
+  u_char metric[3];
+};
+
+struct as_external_info_mt
+{
+  u_char id;
+  u_char metric[3];
+  struct in_addr fwd_addr;
+  u_int32_t route_tag;
+};
+
+struct summary_lsa_mt
+{
+  struct lsa_header header;
+  struct in_addr mask;
+  u_char tos;
+  u_char metric[3];
+  struct summary_mt mt[1];
 };
 
 /* OSPF AS-external-LSAs structure. */
@@ -328,5 +352,8 @@ extern int ospf_translated_nssa_compare (struct ospf_lsa *, struct ospf_lsa *);
 extern struct ospf_lsa *ospf_translated_nssa_refresh (struct ospf *, struct ospf_lsa *,
                                    struct ospf_lsa *);
 extern struct ospf_lsa *ospf_translated_nssa_originate (struct ospf *, struct ospf_lsa *);
+
+extern int ospf_lsa_contains_mtid (struct ospf_area *, struct ospf_lsa *, u_int8_t);
+extern u_int16_t ospf_lsa_link_mtid_metric (struct ospf_area *, struct router_lsa_link *, u_int8_t);
 
 #endif /* _ZEBRA_OSPF_LSA_H */

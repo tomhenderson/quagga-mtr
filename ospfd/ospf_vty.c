@@ -1796,6 +1796,55 @@ DEFUN (no_ospf_area_default_cost,
   return CMD_SUCCESS;
 }
 
+DEFUN (ospf_area_mtr,
+       ospf_area_mtr_cmd,
+       "area (A.B.C.D|<0-4294967295>) mt-default-exclusion",
+       "OSPF area parameters\n"
+       "OSPF area ID in IP address format\n"
+       "OSPF area ID as a decimal value\n"
+       "Configure multi-topology routing default exclusion capability\n" )
+{
+  struct ospf *ospf = vty->index;
+  struct ospf_area *area;
+  struct in_addr area_id;
+  int format;
+
+  VTY_GET_OSPF_AREA_ID (area_id, format, argv[0]);
+
+  area = ospf_area_get (ospf, area_id, format);
+  if (area == NULL)
+    return CMD_SUCCESS;
+
+  ospf_area_default_exclusion_set(ospf, area);
+
+  return CMD_SUCCESS;
+}
+
+DEFUN (no_ospf_area_mtr,
+       no_ospf_area_mtr_cmd,
+       "no area (A.B.C.D|<0-4294967295>) mt-default-exclusion",
+       NO_STR
+       "OSPF area parameters\n"
+       "OSPF area ID in IP address format\n"
+       "OSPF area ID as a decimal value\n"
+       "Configure multi-topology routing default exclusion capability\n" )
+{
+  struct ospf *ospf = vty->index;
+  struct ospf_area *area;
+  struct in_addr area_id;
+  int format;
+
+  VTY_GET_OSPF_AREA_ID (area_id, format, argv[0]);
+
+  area = ospf_area_get (ospf, area_id, format);
+  if (area == NULL)
+    return CMD_SUCCESS;
+
+  ospf_area_default_exclusion_unset(ospf, area);
+
+  return CMD_SUCCESS;
+}
+
 DEFUN (ospf_area_export_list,
        ospf_area_export_list_cmd,
        "area (A.B.C.D|<0-4294967295>) export-list NAME",
@@ -2663,6 +2712,12 @@ show_ip_ospf_area (struct vty *vty, struct ospf_area *area)
     vty_out (vty, "   Number of full virtual adjacencies going through"
 	     " this area: %d%s", area->full_vls, VTY_NEWLINE);
 
+  vty_out (vty, "   Area has ");
+  if (area->default_exclusion == OSPF_DEFAULT_EXCLUSION_ENABLE) 
+    vty_out (vty, "RFC4915 DefaultExclusionCapability enabled%s", VTY_NEWLINE);
+  else 
+    vty_out (vty, "RFC4915 DefaultExclusionCapability disabled%s", VTY_NEWLINE);
+
   /* Show SPF calculation times. */
   vty_out (vty, "   SPF algorithm executed %d times%s",
 	   area->spf_calculation, VTY_NEWLINE);
@@ -2727,8 +2782,8 @@ DEFUN (show_ip_ospf,
              ospf_timer_dump (ospf->t_deferred_shutdown,
                               timebuf, sizeof (timebuf)), VTY_NEWLINE);
   /* Show capability. */
-  vty_out (vty, " Supports only single TOS (TOS0) routes%s", VTY_NEWLINE);
   vty_out (vty, " This implementation conforms to RFC2328%s", VTY_NEWLINE);
+  vty_out (vty, " Supports RFC4915 Multi-Topology (MT) Routing%s", VTY_NEWLINE);
   vty_out (vty, " RFC1583Compatibility flag is %s%s",
 	   CHECK_FLAG (ospf->config, OSPF_RFC1583_COMPATIBLE) ?
 	   "enabled" : "disabled", VTY_NEWLINE);
@@ -3620,23 +3675,36 @@ static void
 show_ip_ospf_database_router_links (struct vty *vty,
                                     struct router_lsa *rl)
 {
-  int len, i, type;
+  int len, i, j, type, link_len;
+  char *ll;
+  struct router_lsa_link *l;
 
-  len = ntohs (rl->header.length) - 4;
-  for (i = 0; i < ntohs (rl->links) && len > 0; len -= 12, i++)
+  ll = (char *)rl->link;
+
+  len = ntohs (rl->header.length) - 24; /* 20 - lsa hdr, 4 - non-link info in lsa body */
+
+  for (i = link_len = 0; i < ntohs (rl->links) && len > 0; len -= link_len, i++)
     {
-      type = rl->link[i].type;
+      l = (struct router_lsa_link *)ll;
+
+      type = l->m[0].type;
 
       vty_out (vty, "    Link connected to: %s%s",
 	       link_type_desc[type], VTY_NEWLINE);
       vty_out (vty, "     (Link ID) %s: %s%s", link_id_desc[type],
-	       inet_ntoa (rl->link[i].link_id), VTY_NEWLINE);
+	       inet_ntoa (l->link_id), VTY_NEWLINE);
       vty_out (vty, "     (Link Data) %s: %s%s", link_data_desc[type],
-	       inet_ntoa (rl->link[i].link_data), VTY_NEWLINE);
-      vty_out (vty, "      Number of TOS metrics: 0%s", VTY_NEWLINE);
-      vty_out (vty, "       TOS 0 Metric: %d%s",
-	       ntohs (rl->link[i].metric), VTY_NEWLINE);
+	       inet_ntoa (l->link_data), VTY_NEWLINE);
+      vty_out (vty, "      Number of MT metrics: %d Default metric: %d%s", 
+               l->m[0].tos_count, ntohs (l->m[0].metric), VTY_NEWLINE);
+      for (j = 0; j < l->m[0].tos_count; j++ ) {
+	vty_out (vty, "       MT-ID %d Metric: %d%s", l->m[j+1].type,
+		 ntohs (l->m[j+1].metric), VTY_NEWLINE);
+      }
       vty_out (vty, "%s", VTY_NEWLINE);
+
+      link_len = 12 + 4 * l->m[0].tos_count;
+      ll += link_len;
     }
 }
 
@@ -3699,9 +3767,27 @@ show_summary_lsa_detail (struct vty *vty, struct ospf_lsa *lsa)
 
       vty_out (vty, "  Network Mask: /%d%s", ip_masklen (sl->mask),
 	       VTY_NEWLINE);
-      vty_out (vty, "        TOS: 0  Metric: %d%s", GET_METRIC (sl->metric),
+      vty_out (vty, "        MT-ID: 0  Metric: %d%s", GET_METRIC (sl->metric),
 	       VTY_NEWLINE);
-	  vty_out (vty, "%s", VTY_NEWLINE);
+
+      {
+	int num_mts;
+	int i;
+	struct summary_lsa_mt *slm = (struct summary_lsa_mt *) lsa->data;
+
+	num_mts = (ntohs (slm->header.length)
+		   - sizeof ( struct summary_lsa ))
+	  / sizeof (struct summary_mt);
+
+	for (i = 0; i < num_mts; i++) 
+	  {
+	    vty_out (vty, "        MT: %d  Metric: %d%s", 
+		     slm->mt[i].id, GET_METRIC (slm->mt[i].metric),
+		     VTY_NEWLINE);
+	  }
+      }
+
+      vty_out (vty, "%s", VTY_NEWLINE);
     }
 
   return 0;
@@ -3719,9 +3805,27 @@ show_summary_asbr_lsa_detail (struct vty *vty, struct ospf_lsa *lsa)
 
       vty_out (vty, "  Network Mask: /%d%s",
 	       ip_masklen (sl->mask), VTY_NEWLINE);
-      vty_out (vty, "        TOS: 0  Metric: %d%s", GET_METRIC (sl->metric),
+      vty_out (vty, "        MT-ID: 0  Metric: %d%s", GET_METRIC (sl->metric),
 	       VTY_NEWLINE);
-	  vty_out (vty, "%s", VTY_NEWLINE);
+
+      {
+	int num_mts;
+	int i;
+	struct summary_lsa_mt *slm = (struct summary_lsa_mt *) lsa->data;
+
+	num_mts = (ntohs (slm->header.length)
+		   - sizeof ( struct summary_lsa ))
+	  / sizeof (struct summary_mt);
+	
+	for (i = 0; i < num_mts; i++) 
+	  {
+	    vty_out (vty, "        MT: %d  Metric: %d%s", 
+		     slm->mt[i].id, GET_METRIC (slm->mt[i].metric),
+		     VTY_NEWLINE);
+	  }
+      }
+
+      vty_out (vty, "%s", VTY_NEWLINE);
     }
 
   return 0;
@@ -3742,7 +3846,7 @@ show_as_external_lsa_detail (struct vty *vty, struct ospf_lsa *lsa)
       vty_out (vty, "        Metric Type: %s%s",
 	       IS_EXTERNAL_METRIC (al->e[0].tos) ?
 	       "2 (Larger than any link state path)" : "1", VTY_NEWLINE);
-      vty_out (vty, "        TOS: 0%s", VTY_NEWLINE);
+      vty_out (vty, "        MT-ID: 0%s", VTY_NEWLINE);
       vty_out (vty, "        Metric: %d%s",
 	       GET_METRIC (al->e[0].metric), VTY_NEWLINE);
       vty_out (vty, "        Forward Address: %s%s",
@@ -3750,6 +3854,29 @@ show_as_external_lsa_detail (struct vty *vty, struct ospf_lsa *lsa)
 
       vty_out (vty, "        External Route Tag: %lu%s%s",
 	       (u_long)ntohl (al->e[0].route_tag), VTY_NEWLINE, VTY_NEWLINE);
+
+      {
+	int num_mts;
+	int i;
+
+	num_mts = (ntohs (al->header.length)
+		   - sizeof (struct as_external_lsa))
+	  / sizeof (struct as_external_info_mt);
+
+	for (i = 1; i < (num_mts + 1); i++) 
+	  {
+	    vty_out (vty, "        Metric Type: %s%s",
+		     IS_EXTERNAL_METRIC (al->e[i].tos) ?
+		     "2 (Larger than any link state path)" : "1", VTY_NEWLINE);
+	    vty_out (vty, "        MT: %d%s", al->e[i].tos & 0x7f, VTY_NEWLINE);
+	    vty_out (vty, "        Metric: %d%s",
+		     GET_METRIC (al->e[i].metric), VTY_NEWLINE);
+	    vty_out (vty, "        Forward Address: %s%s",
+		     inet_ntoa (al->e[i].fwd_addr), VTY_NEWLINE);
+	    vty_out (vty, "        External Route Tag: %lu%s%s",
+		     (u_long)ntohl (al->e[i].route_tag), VTY_NEWLINE, VTY_NEWLINE);
+	  }
+      }
     }
 
   return 0;
@@ -3768,7 +3895,7 @@ show_as_external_lsa_stdvty (struct ospf_lsa *lsa)
   zlog_debug( "        Metric Type: %s%s",
 	     IS_EXTERNAL_METRIC (al->e[0].tos) ?
 	     "2 (Larger than any link state path)" : "1", "\n");
-  zlog_debug( "        TOS: 0%s", "\n");
+  zlog_debug( "        MT-ID: 0%s", "\n");
   zlog_debug( "        Metric: %d%s",
 	     GET_METRIC (al->e[0].metric), "\n");
   zlog_debug( "        Forward Address: %s%s",
@@ -3795,7 +3922,7 @@ show_as_nssa_lsa_detail (struct vty *vty, struct ospf_lsa *lsa)
       vty_out (vty, "        Metric Type: %s%s",
 	       IS_EXTERNAL_METRIC (al->e[0].tos) ?
 	       "2 (Larger than any link state path)" : "1", VTY_NEWLINE);
-      vty_out (vty, "        TOS: 0%s", VTY_NEWLINE);
+      vty_out (vty, "        MT-ID: 0%s", VTY_NEWLINE);
       vty_out (vty, "        Metric: %d%s",
 	       GET_METRIC (al->e[0].metric), VTY_NEWLINE);
       vty_out (vty, "        NSSA: Forward Address: %s%s",
@@ -3803,6 +3930,29 @@ show_as_nssa_lsa_detail (struct vty *vty, struct ospf_lsa *lsa)
 
       vty_out (vty, "        External Route Tag: %u%s%s",
 	       ntohl (al->e[0].route_tag), VTY_NEWLINE, VTY_NEWLINE);
+
+      {
+	int num_mts;
+	int i;
+
+	num_mts = (ntohs (al->header.length)
+		   - sizeof (struct as_external_lsa))
+	  / sizeof (struct as_external_info_mt);
+
+	for (i = 1; i < (num_mts + 1); i++) 
+	  {
+	    vty_out (vty, "        Metric Type: %s%s",
+		     IS_EXTERNAL_METRIC (al->e[i].tos) ?
+		     "2 (Larger than any link state path)" : "1", VTY_NEWLINE);
+	    vty_out (vty, "        MT: %d%s", al->e[i].tos & 0x7f, VTY_NEWLINE);
+	    vty_out (vty, "        Metric: %d%s",
+		     GET_METRIC (al->e[i].metric), VTY_NEWLINE);
+	    vty_out (vty, "        NSSA: Forward Address: %s%s",
+		     inet_ntoa (al->e[i].fwd_addr), VTY_NEWLINE);
+	    vty_out (vty, "        External Route Tag: %lu%s%s",
+		     (u_long)ntohl (al->e[i].route_tag), VTY_NEWLINE, VTY_NEWLINE);
+	  }
+      }
     }
 
   return 0;
@@ -5304,6 +5454,344 @@ ALIAS (no_ip_ospf_hello_interval,
        NO_STR
        "OSPF interface commands\n"
        "Time between HELLO packets\n")
+
+DEFUN (ip_ospf_mt_id,
+       ip_ospf_mt_id_addr_cmd,
+       "ip ospf mt-id <0-127> cost <1-65535> A.B.C.D",
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n"
+       "Multi-topology cost\n"
+       "Cost\n"
+       "Address of interface\n")
+{
+  struct interface *ifp = vty->index;
+  u_int32_t mt_id;
+  u_int32_t cost;
+  u_int16_t mt_metric = OSPF_OUTPUT_COST_DEFAULT;
+  struct in_addr addr;
+  int ret;
+  struct ospf_if_params *params;
+  struct ospf_interface *oi = NULL;
+  struct route_node *rn;
+  int changed = 0;
+ 
+  params = IF_DEF_PARAMS (ifp);
+  for (rn = route_top (IF_OIFS (ifp)); rn; rn = route_next (rn))
+    {
+      oi = rn->info;
+
+      if (!oi)
+	continue;
+    }
+
+  mt_id = strtol (argv[0], NULL, 10);
+  
+  /* The range for valid, configurable, MT IDs is <0-127>. */
+  if (mt_id > OSPF_MAX_MT_ID)    
+    {
+      vty_out (vty, "MT ID is invalid%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+
+  if (mt_id == 0 && oi && oi->area 
+      && oi->area->default_exclusion == OSPF_DEFAULT_EXCLUSION_DISABLE)
+    {
+      vty_out (vty, "MT ID 0 is invalid while "
+          "mt-default-exclusion is disabled %s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+  /* if a cost metric is supplied */
+  if (argc > 1)
+    {
+      cost = strtol (argv[1], NULL, 10);
+      if (cost < 1 || cost > 65535 ) 
+	{
+	  vty_out (vty, "MT Cost is invalid%s", VTY_NEWLINE);
+	  return CMD_WARNING;
+	}
+      else 
+	{
+	  mt_metric = (u_int16_t)cost;
+	}
+    }
+
+  if (argc > 2)
+    {
+      ret = inet_aton(argv[1], &addr);
+      if (!ret)
+	{
+	  vty_out (vty, "Please specify interface address by A.B.C.D%s",
+		   VTY_NEWLINE);
+	  return CMD_WARNING;
+	}
+    }
+
+  if (OSPF_IF_PARAM_CONFIGURED (params, mt_map) && 
+    (params->mt_map[mt_id/OSPF_NUM_MT_MAP_ENTRIES]
+      & (1 << mt_id % OSPF_NUM_MT_MAP_ENTRIES)))
+    {
+      if (params->mt_metric[mt_id] != mt_metric)
+        {
+          changed = 1;
+        }
+    }
+  /* configure the given MT ID's metric and 
+   * mark the MT ID in use (in the mt map).
+   */
+  params->mt_metric[mt_id] = mt_metric;
+  params->mt_map[mt_id / OSPF_NUM_MT_MAP_ENTRIES] 
+    |= 1 << mt_id % OSPF_NUM_MT_MAP_ENTRIES;
+
+  /* indicate that at least one MT ID is configured */
+  SET_IF_PARAM (params, mt_map); 
+  if (changed)
+    {
+      /* schedule new Router LSA if not already scheduled */
+      ospf_router_lsa_timer_add (oi->area);
+    }
+
+  return CMD_SUCCESS;
+}
+
+DEFUN (ip_ospf_mt_addr_without_cost_id,
+       ip_ospf_mt_id_addr_without_cost_cmd,
+       "ip ospf mt-id <0-127> A.B.C.D",
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n"
+       "Address of interface\n")
+{
+  struct interface *ifp = vty->index;
+  u_int32_t mt_id;
+  struct in_addr addr;
+  int ret;
+  struct ospf_if_params *params;
+  struct ospf_interface *oi = NULL;
+  struct route_node *rn;
+  int changed = 0;
+      
+  params = IF_DEF_PARAMS (ifp);
+  for (rn = route_top (IF_OIFS (ifp)); rn; rn = route_next (rn))
+    {
+      oi = rn->info;
+
+      if (!oi)
+	continue;
+    }
+
+  mt_id = strtol (argv[0], NULL, 10);
+  
+  if (mt_id == 0 && oi && oi->area 
+      && oi->area->default_exclusion == OSPF_DEFAULT_EXCLUSION_DISABLE)
+    {
+      vty_out (vty, "MT ID 0 is invalid while "
+          "mt-default-exclusion is disabled %s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+  /* The range for valid, configurable, MT IDs is <0-127>. */
+  if (mt_id > OSPF_MAX_MT_ID)
+    {
+      vty_out (vty, "MT ID is invalid%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+
+  if (argc > 1)
+    {
+      ret = inet_aton(argv[1], &addr);
+      if (!ret)
+	{
+	  vty_out (vty, "Please specify interface address by A.B.C.D%s",
+		   VTY_NEWLINE);
+	  return CMD_WARNING;
+	}
+    }
+
+  if (OSPF_IF_PARAM_CONFIGURED (params, mt_map) && 
+    (params->mt_map[mt_id/OSPF_NUM_MT_MAP_ENTRIES]
+      & (1 << mt_id % OSPF_NUM_MT_MAP_ENTRIES)))
+    {
+      if (params->mt_metric[mt_id] != OSPF_OUTPUT_COST_DEFAULT)
+        {
+          changed = 1;
+        }
+    }
+  /* configure the given MT ID and associated metric */
+  params->mt_metric[mt_id] = OSPF_OUTPUT_COST_DEFAULT;
+  params->mt_map[mt_id / OSPF_NUM_MT_MAP_ENTRIES] 
+    |= 1 << mt_id % OSPF_NUM_MT_MAP_ENTRIES;
+
+  /* indicate that, at least one, MT ID is configured */
+  SET_IF_PARAM (params, mt_map); 
+  if (changed)
+    {
+      /* schedule new Router LSA if not already scheduled */
+      ospf_router_lsa_timer_add (oi->area);
+    }
+
+  return CMD_SUCCESS;
+}
+
+ALIAS (ip_ospf_mt_id,
+       ip_ospf_mt_id_cmd,
+       "ip ospf mt-id <0-127>",
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n")
+
+ALIAS (ip_ospf_mt_id,
+       ip_ospf_mt_id_cost_cmd,
+       "ip ospf mt-id <0-127> cost <1-65535>",
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n"
+       "Multi-topology cost\n"
+       "Cost\n")
+
+ALIAS (ip_ospf_mt_id,
+       ospf_mt_id_cmd,
+       "ospf mt-id <0-127>",
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n");
+
+ALIAS (ip_ospf_mt_id,
+       ospf_mt_id_cost_cmd,
+       "ospf mt-id <0-127> cost <1-65535>",
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n"
+       "Multi-topology cost\n"
+       "Cost\n")
+
+DEFUN (no_ip_ospf_mt_id,
+       no_ip_ospf_mt_id_addr_cmd,
+       "no ip ospf mt-id <0-127> cost <1-65535> A.B.C.D",
+       NO_STR
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Multi-topology cost\n"
+       "Address of interface\n")
+{
+  struct interface *ifp = vty->index;
+  int i;
+  u_int32_t mt_id;
+  struct ospf_if_params *params;
+  
+  ifp = vty->index;
+  params = IF_DEF_PARAMS (ifp);
+
+  /* extract the mt id from supplied arguments */
+  mt_id = strtol (argv[0], NULL, 10);
+
+  /* The range for valid, configurable, MT IDs is <0-127>. */
+  if (mt_id > OSPF_MAX_MT_ID)
+    {
+      vty_out (vty, "MT ID is invalid%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+
+  /* indicate which MT ID is de-configured */
+  params->mt_map[mt_id / OSPF_NUM_MT_MAP_ENTRIES] 
+    &= ~(1 << mt_id % OSPF_NUM_MT_MAP_ENTRIES);
+  params->mt_metric[mt_id] = 0;
+
+  /* see if any MT_IDs remain configured */
+  for (i = 0; i < OSPF_UINT32_SIZE_MT_BIT_VECTOR; i++) 
+    {
+      if (params->mt_map[i]) { break; }
+    }
+  if (i == OSPF_UINT32_SIZE_MT_BIT_VECTOR)
+    {
+      UNSET_IF_PARAM (params, mt_map); 
+    }
+  return CMD_SUCCESS;
+}
+
+DEFUN (no_ip_ospf_mt_addr_without_cost_id,
+       no_ip_ospf_mt_id_addr_without_cost_cmd,
+       "no ip ospf mt-id <0-127> A.B.C.D",
+       NO_STR
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Address of interface\n")
+{
+  struct interface *ifp = vty->index;
+  int i;
+  u_int32_t mt_id;
+  struct ospf_if_params *params;
+  
+  ifp = vty->index;
+  params = IF_DEF_PARAMS (ifp);
+
+  /* extract the mt id from supplied arguments */
+  mt_id = strtol (argv[0], NULL, 10);
+
+  /* The range for valid, configurable, MT IDs is <0-127>. */
+  if (mt_id > OSPF_MAX_MT_ID)
+    {
+      vty_out (vty, "MT ID is invalid%s", VTY_NEWLINE);
+      return CMD_WARNING;
+    }
+
+  /* indicate which MT ID is de-configured */
+  params->mt_map[mt_id / OSPF_NUM_MT_MAP_ENTRIES] 
+    &= 0 << mt_id % OSPF_NUM_MT_MAP_ENTRIES;
+  params->mt_metric[mt_id] = 0;
+
+  /* see if any MT_IDs remain configured */
+  for (i = 0; i < OSPF_UINT32_SIZE_MT_BIT_VECTOR; i++) 
+    {
+      if (params->mt_map[i]) { break; }
+    }
+  if (i == OSPF_UINT32_SIZE_MT_BIT_VECTOR)
+    {
+      UNSET_IF_PARAM (params, mt_map); 
+      params->mt_metric[mt_id] = 0;
+    }
+
+  return CMD_SUCCESS;
+}
+
+ALIAS (no_ip_ospf_mt_id,
+       no_ip_ospf_mt_id_cmd,
+       "no ip ospf mt-id <0-127>",
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n")
+
+ALIAS (no_ip_ospf_mt_id,
+       no_ip_ospf_mt_id_cost_cmd,
+       "no ip ospf mt-id <0-127> cost <1-65535>",
+       "IP Information\n"
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n"
+       "Multi-topology cost\n"
+       "Cost\n")
+
+ALIAS (no_ip_ospf_mt_id,
+       no_ospf_mt_id_cmd,
+       "no ospf mt-id <0-127>",
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n")
+
+ALIAS (no_ip_ospf_mt_id,
+       no_ospf_mt_id_cost_cmd,
+       "no ospf mt-id <0-127> cost <1-65535>",
+       "OSPF interface commands\n"
+       "Multi-topology identifier\n"
+       "Identifier\n"
+       "Multi-topology cost\n"
+       "Cost\n")
 
 DEFUN (ip_ospf_network,
        ip_ospf_network_cmd,
@@ -7225,6 +7713,74 @@ show_ip_ospf_route_network (struct vty *vty, struct route_table *rt)
 }
 
 static void
+show_ip_ospf_route_mt_network (struct vty *vty, struct ospf *ospf)
+{
+  int i; 
+  struct route_table *rt;
+  struct route_node *rn;
+  struct ospf_route *or;
+  struct listnode *pnode;
+  struct ospf_path *path;
+
+  vty_out (vty, "============ OSPF multi-topology network routing tables ============%s",
+	   VTY_NEWLINE);
+
+  for ( i = 0; i < OSPF_MAX_NUM_MT_IDS; i++ ) {
+
+    rt = ospf->new_table[i];
+
+    if (!rt)             continue;
+    if (!route_top (rt)) continue;
+
+    vty_out (vty, "============ mt id %d ============%s",
+	     i, VTY_NEWLINE);
+
+    for (rn = route_top (rt); rn; rn = route_next (rn))
+      if ((or = rn->info) != NULL)
+	{
+	  char buf1[19];
+	  snprintf (buf1, 19, "%s/%d",
+		    inet_ntoa (rn->p.u.prefix4), rn->p.prefixlen);
+	  
+	  switch (or->path_type)
+	    {
+	    case OSPF_PATH_INTER_AREA:
+	      if (or->type == OSPF_DESTINATION_NETWORK)
+		vty_out (vty, "N IA %-18s    [%d] area: %s%s", buf1, or->cost,
+			 inet_ntoa (or->u.std.area_id), VTY_NEWLINE);
+	      else if (or->type == OSPF_DESTINATION_DISCARD)
+		vty_out (vty, "D IA %-18s    Discard entry%s", buf1, VTY_NEWLINE);
+	      break;
+	    case OSPF_PATH_INTRA_AREA:
+	      vty_out (vty, "N    %-18s    [%d] area: %s%s", buf1, or->cost,
+		       inet_ntoa (or->u.std.area_id), VTY_NEWLINE);
+	      break;
+	    default:
+	      break;
+	    }
+
+	  if (or->type == OSPF_DESTINATION_NETWORK)
+	    for (ALL_LIST_ELEMENTS_RO (or->paths, pnode, path))
+            {
+              if (if_lookup_by_index(path->ifindex))
+                {
+                  if (path->nexthop.s_addr == 0)
+                    vty_out (vty, "%24s   directly attached to %s%s",
+                             "", ifindex2ifname (path->ifindex), VTY_NEWLINE);
+                  else
+                    vty_out (vty, "%24s   via %s, %s%s", "",
+                             inet_ntoa (path->nexthop),
+                             ifindex2ifname (path->ifindex),
+                             VTY_NEWLINE);
+                }
+            }
+	}
+    vty_out (vty, "%s", VTY_NEWLINE);
+  }
+  vty_out (vty, "%s", VTY_NEWLINE);
+}
+
+static void
 show_ip_ospf_route_router (struct vty *vty, struct route_table *rtrs)
 {
   struct route_node *rn;
@@ -7278,6 +7834,71 @@ show_ip_ospf_route_router (struct vty *vty, struct route_table *rtrs)
 }
 
 static void
+show_ip_ospf_route_mt_router (struct vty *vty, struct ospf *ospf)
+{
+  int i; 
+  struct route_table *rt;
+  struct route_node *rn;
+  struct ospf_route *or;
+  struct listnode *pn, *nn;
+  struct ospf_path *path;
+
+  vty_out (vty, "============ OSPF multi-topology router routing table =============%s",
+	   VTY_NEWLINE);
+
+  for ( i = 0; i < OSPF_MAX_NUM_MT_IDS; i++ ) {
+
+    rt = ospf->new_rtrs[i];
+
+    if (!rt)             continue;
+    if (!route_top (rt)) continue;
+    
+    vty_out (vty, "============ mt id %d ============%s",
+	     i, VTY_NEWLINE);
+
+
+    for (rn = route_top (rt); rn; rn = route_next (rn))
+      if (rn->info)
+	{
+	  int flag = 0;
+
+	  vty_out (vty, "R    %-15s    ", inet_ntoa (rn->p.u.prefix4));
+
+	  for (nn = listhead ((struct list *) rn->info); nn; nn = listnextnode (nn))
+	    if ((or = listgetdata (nn)) != NULL)
+	      {
+		if (flag++)
+		  vty_out (vty, "%24s", "");
+
+		/* Show path. */
+		vty_out (vty, "%s [%d] area: %s",
+			 (or->path_type == OSPF_PATH_INTER_AREA ? "IA" : "  "),
+			 or->cost, inet_ntoa (or->u.std.area_id));
+		/* Show flags. */
+		vty_out (vty, "%s%s%s",
+			 (or->u.std.flags & ROUTER_LSA_BORDER ? ", ABR" : ""),
+			 (or->u.std.flags & ROUTER_LSA_EXTERNAL ? ", ASBR" : ""),
+			 VTY_NEWLINE);
+		    
+		for (ALL_LIST_ELEMENTS_RO (or->paths, pn, path))
+		  {
+		    if (path->nexthop.s_addr == 0)
+		      vty_out (vty, "%24s   directly attached to %s%s",
+                               "", ifindex2ifname (path->ifindex), VTY_NEWLINE);
+		    else
+		      vty_out (vty, "%24s   via %s, %s%s", "",
+                               inet_ntoa (path->nexthop),
+                               ifindex2ifname (path->ifindex),
+			       VTY_NEWLINE);
+		  }
+	      }
+	}
+    vty_out (vty, "%s", VTY_NEWLINE);
+  }
+  vty_out (vty, "%s", VTY_NEWLINE);
+}
+
+static void
 show_ip_ospf_route_external (struct vty *vty, struct route_table *rt)
 {
   struct route_node *rn;
@@ -7324,6 +7945,68 @@ show_ip_ospf_route_external (struct vty *vty, struct route_table *rt)
   vty_out (vty, "%s", VTY_NEWLINE);
 }
 
+static void
+show_ip_ospf_route_mt_external (struct vty *vty, struct ospf *ospf)
+{
+  int i;
+  struct route_table *rt;
+  struct route_node *rn;
+  struct ospf_route *er;
+  struct listnode *pnode;
+  struct ospf_path *path;
+
+  vty_out (vty, "============ OSPF multi-topology external routing table ===========%s",
+	   VTY_NEWLINE);
+
+  for ( i = 0; i < OSPF_MAX_NUM_MT_IDS; i++ ) {
+
+    rt = ospf->old_external_route;
+
+    if (!rt)             continue;
+    if (!route_top (rt)) continue;
+    
+    vty_out (vty, "============ mt id %d ============%s",
+	     i, VTY_NEWLINE);
+
+    for (rn = route_top (rt); rn; rn = route_next (rn))
+      if ((er = rn->info) != NULL)
+	{
+	  char buf1[19];
+	  snprintf (buf1, 19, "%s/%d",
+		    inet_ntoa (rn->p.u.prefix4), rn->p.prefixlen);
+
+	  switch (er->path_type)
+	    {
+	    case OSPF_PATH_TYPE1_EXTERNAL:
+	      vty_out (vty, "N E1 %-18s    [%d] tag: %u%s", buf1,
+		       er->cost, er->u.ext.tag, VTY_NEWLINE);
+	      break;
+	    case OSPF_PATH_TYPE2_EXTERNAL:
+	      vty_out (vty, "N E2 %-18s    [%d/%d] tag: %u%s", buf1, er->cost,
+		       er->u.ext.type2_cost, er->u.ext.tag, VTY_NEWLINE);
+	      break;
+	    }
+
+	  for (ALL_LIST_ELEMENTS_RO (er->paths, pnode, path))
+	    {
+              if (if_lookup_by_index(path->ifindex))
+		{
+		  if (path->nexthop.s_addr == 0)
+		    vty_out (vty, "%24s   directly attached to %s%s",
+                             "", ifindex2ifname (path->ifindex), VTY_NEWLINE);
+		  else
+		    vty_out (vty, "%24s   via %s, %s%s", "",
+                             inet_ntoa (path->nexthop),
+                             ifindex2ifname (path->ifindex),
+			     VTY_NEWLINE);
+		}
+	    }
+        }
+    vty_out (vty, "%s", VTY_NEWLINE);
+  }
+  vty_out (vty, "%s", VTY_NEWLINE);
+}
+
 DEFUN (show_ip_ospf_border_routers,
        show_ip_ospf_border_routers_cmd,
        "show ip ospf border-routers",
@@ -7347,10 +8030,13 @@ DEFUN (show_ip_ospf_border_routers,
     }
 
   /* Show Network routes.
-  show_ip_ospf_route_network (vty, ospf->new_table);   */
+  show_ip_ospf_route_network (vty, ospf->new_table[0]); */   
 
   /* Show Router routes. */
-  show_ip_ospf_route_router (vty, ospf->new_rtrs);
+  show_ip_ospf_route_router (vty, ospf->new_rtrs[0]);
+
+  /* Show Router routes. */
+  show_ip_ospf_route_mt_router (vty, ospf);
 
   return CMD_SUCCESS;
 }
@@ -7378,13 +8064,22 @@ DEFUN (show_ip_ospf_route,
     }
 
   /* Show Network routes. */
-  show_ip_ospf_route_network (vty, ospf->new_table);
+  show_ip_ospf_route_network (vty, ospf->new_table[0]);
+
+  /* Show multi-topology Network routes. */
+  show_ip_ospf_route_mt_network (vty, ospf);
 
   /* Show Router routes. */
-  show_ip_ospf_route_router (vty, ospf->new_rtrs);
+  show_ip_ospf_route_router (vty, ospf->new_rtrs[0]);
+
+  /* Show multi-topology Router routes. */
+  show_ip_ospf_route_mt_router (vty, ospf);
 
   /* Show AS External routes. */
   show_ip_ospf_route_external (vty, ospf->old_external_route);
+
+  /* Show multi-topology AS External routes. */
+  show_ip_ospf_route_mt_external (vty, ospf);
 
   return CMD_SUCCESS;
 }
@@ -7545,8 +8240,25 @@ config_write_interface (struct vty *vty)
 	      vty_out (vty, " %s", inet_ntoa (rn->p.u.prefix4));
 	    vty_out (vty, "%s", VTY_NEWLINE);
 	  }
+
+	/* Multi-topology IDs (MT_IDs) print. */
+	if (OSPF_IF_PARAM_CONFIGURED (params, mt_map))
+	  {
+	    int i;
 	
-	
+	    for (i = 0; i <= OSPF_MAX_MT_ID; i++)
+	      {
+		if (params->mt_map[i/OSPF_NUM_MT_MAP_ENTRIES] 
+		    & (1 << i % OSPF_NUM_MT_MAP_ENTRIES))
+		{
+                  /* Print cost even if it equals OSPF_OUTPUT_COST_DEFAULT */
+		  vty_out (vty, " ip ospf mt-id %u cost %u", i, 
+                    params->mt_metric[i]);
+		  vty_out (vty, "%s", VTY_NEWLINE);
+		}
+	      }
+	  }
+
 	/* Router Dead Interval print. */
 	if (OSPF_IF_PARAM_CONFIGURED (params, v_wait) &&
 	    params->v_wait != OSPF_ROUTER_DEAD_INTERVAL_DEFAULT)
@@ -7685,6 +8397,9 @@ config_write_ospf_area (struct vty *vty, struct ospf *ospf)
 	    vty_out (vty, " area %s authentication message-digest%s",
 		     buf, VTY_NEWLINE);
 	}
+
+      if (area->default_exclusion == OSPF_DEFAULT_EXCLUSION_ENABLE) 
+	vty_out (vty, " area %s mt-default-exclusion%s", buf, VTY_NEWLINE );
 
       if (area->shortcut_configured != OSPF_SHORTCUT_DEFAULT)
 	vty_out (vty, " area %s shortcut %s%s", buf,
@@ -8215,6 +8930,17 @@ ospf_vty_if_init (void)
   install_element (INTERFACE_NODE, &no_ip_ospf_hello_interval_addr_cmd);
   install_element (INTERFACE_NODE, &no_ip_ospf_hello_interval_cmd);
 
+  /* "ip ospf mt-id" commands. */
+  install_element (INTERFACE_NODE, &ip_ospf_mt_id_addr_cmd);
+  install_element (INTERFACE_NODE, &ip_ospf_mt_id_cmd);
+  install_element (INTERFACE_NODE, &ip_ospf_mt_id_cost_cmd);
+  install_element (INTERFACE_NODE, &ip_ospf_mt_id_addr_without_cost_cmd);
+
+  install_element (INTERFACE_NODE, &no_ip_ospf_mt_id_addr_cmd);
+  install_element (INTERFACE_NODE, &no_ip_ospf_mt_id_cost_cmd);
+  install_element (INTERFACE_NODE, &no_ip_ospf_mt_id_cmd);
+  install_element (INTERFACE_NODE, &no_ip_ospf_mt_id_addr_without_cost_cmd);
+
   /* "ip ospf network" commands. */
   install_element (INTERFACE_NODE, &ip_ospf_network_cmd);
   install_element (INTERFACE_NODE, &no_ip_ospf_network_cmd);
@@ -8252,6 +8978,12 @@ ospf_vty_if_init (void)
   install_element (INTERFACE_NODE, &no_ospf_dead_interval_cmd);
   install_element (INTERFACE_NODE, &ospf_hello_interval_cmd);
   install_element (INTERFACE_NODE, &no_ospf_hello_interval_cmd);
+
+  install_element (INTERFACE_NODE, &ospf_mt_id_cmd);
+  install_element (INTERFACE_NODE, &ospf_mt_id_cost_cmd);
+  install_element (INTERFACE_NODE, &no_ospf_mt_id_cmd);
+  install_element (INTERFACE_NODE, &no_ospf_mt_id_cost_cmd);
+
   install_element (INTERFACE_NODE, &ospf_network_cmd);
   install_element (INTERFACE_NODE, &no_ospf_network_cmd);
   install_element (INTERFACE_NODE, &ospf_priority_cmd);
@@ -8466,6 +9198,10 @@ ospf_vty_init (void)
   install_element (OSPF_NODE, &ospf_area_stub_cmd);
   install_element (OSPF_NODE, &no_ospf_area_stub_no_summary_cmd);
   install_element (OSPF_NODE, &no_ospf_area_stub_cmd);
+
+  /* "area mtr" commands. */
+  install_element (OSPF_NODE, &ospf_area_mtr_cmd);
+  install_element (OSPF_NODE, &no_ospf_area_mtr_cmd);
 
   /* "area nssa" commands. */
   install_element (OSPF_NODE, &ospf_area_nssa_cmd);

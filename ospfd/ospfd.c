@@ -176,6 +176,10 @@ ospf_new (void)
 
   new->passive_interface_default = OSPF_IF_ACTIVE;
   
+  memset (new->old_table, 0, OSPF_MAX_NUM_MT_IDS * sizeof (struct route_table *));
+  memset (new->new_table, 0, OSPF_MAX_NUM_MT_IDS * sizeof (struct route_table *));
+  memset (new->old_rtrs, 0, OSPF_MAX_NUM_MT_IDS * sizeof (struct route_table *));
+  memset (new->new_rtrs, 0, OSPF_MAX_NUM_MT_IDS * sizeof (struct route_table *));
   new->new_external_route = route_table_init ();
   new->old_external_route = route_table_init ();
   new->external_lsas = route_table_init ();
@@ -429,6 +433,10 @@ ospf_finish_final (struct ospf *ospf)
   for (ALL_LIST_ELEMENTS (ospf->oiflist, node, nnode, oi))
     ospf_if_free (oi);
 
+  list_delete (ospf->oiflist);
+
+  list_delete (ospf->oi_write_q);
+
   /* Clear static neighbors */
   for (rn = route_top (ospf->nbr_nbma); rn; rn = route_next (rn))
     if ((nbr_nbma = rn->info))
@@ -464,6 +472,8 @@ ospf_finish_final (struct ospf *ospf)
 	  route_unlock_node (rn);
 	}
     }
+
+  route_table_finish (ospf->networks);
 
   for (ALL_LIST_ELEMENTS (ospf->areas, node, nnode, area))
     {
@@ -506,17 +516,20 @@ ospf_finish_final (struct ospf *ospf)
 
   list_delete (ospf->maxage_lsa);
 
-  if (ospf->old_table)
-    ospf_route_table_free (ospf->old_table);
-  if (ospf->new_table)
+  for (i = OSPF_MIN_MT_ID; i < OSPF_MAX_NUM_MT_IDS; i++) 
     {
-      ospf_route_delete (ospf->new_table);
-      ospf_route_table_free (ospf->new_table);
+      if (ospf->old_table[i])
+        ospf_route_table_free (ospf->old_table[i]);
+      if (ospf->new_table[i])
+        {
+          ospf_route_delete (ospf->new_table[i]);
+          ospf_route_table_free (ospf->new_table[i]);
+        }
+      if (ospf->old_rtrs[i])
+        ospf_rtrs_free (ospf->old_rtrs[i]);
+      if (ospf->new_rtrs[i])
+        ospf_rtrs_free (ospf->new_rtrs[i]);
     }
-  if (ospf->old_rtrs)
-    ospf_rtrs_free (ospf->old_rtrs);
-  if (ospf->new_rtrs)
-    ospf_rtrs_free (ospf->new_rtrs);
   if (ospf->new_external_route)
     {
       ospf_route_delete (ospf->new_external_route);
@@ -587,6 +600,8 @@ ospf_area_new (struct ospf *ospf, struct in_addr area_id)
 
   if (area_id.s_addr == OSPF_AREA_BACKBONE)
     ospf->backbone = new;
+
+  new->default_exclusion = OSPF_DEFAULT_EXCLUSION_DISABLE;
 
   return new;
 }
@@ -884,6 +899,11 @@ ospf_network_run_interface (struct prefix *p, struct ospf_area *area,
                skip network type setting. */
             oi->type = IF_DEF_PARAMS (ifp)->type;
             
+	    if (area->default_exclusion == OSPF_DEFAULT_EXCLUSION_ENABLE)
+	      SET_FLAG (oi->nbr_self->options, OSPF_OPTION_MT);
+	    else 
+	      UNSET_FLAG (oi->nbr_self->options, OSPF_OPTION_MT);
+
             ospf_area_add_if (oi->area, oi);
             
             /* if router_id is not configured, dont bring up
@@ -1141,6 +1161,67 @@ ospf_area_no_summary_unset (struct ospf *ospf, struct in_addr area_id)
 
   area->no_summary = 0;
   ospf_area_check_free (ospf, area_id);
+
+  return 1;
+}
+
+int
+ospf_area_default_exclusion_set (struct ospf *ospf, struct ospf_area *area)
+{
+
+  /* if mtr is not already enabled */
+  if (area->default_exclusion != OSPF_DEFAULT_EXCLUSION_ENABLE)
+    {
+      struct listnode *node;
+      struct ospf_interface *oi;
+
+      area->default_exclusion = OSPF_DEFAULT_EXCLUSION_ENABLE;
+
+      if (IS_DEBUG_OSPF_EVENT)
+	zlog_debug ("Area[%s]: Configured with mt-default-exclusion enabled", 
+		    inet_ntoa (area->area_id) );
+
+      for (node = listhead (area->oiflist); node; node = listnextnode (node))
+	if ((oi = listgetdata (node)) != NULL)
+	    if (oi->nbr_self != NULL)
+	      {
+		SET_FLAG (oi->nbr_self->options, OSPF_OPTION_MT);
+	      }
+    }
+
+  return 1;
+}
+
+int
+ospf_area_default_exclusion_unset (struct ospf *ospf, struct ospf_area *area)
+{
+
+  /* if mtr is not already disabled */
+  if (area->default_exclusion != OSPF_DEFAULT_EXCLUSION_DISABLE)
+    {
+      struct listnode *node;
+      struct ospf_interface *oi;
+
+      area->default_exclusion = OSPF_DEFAULT_EXCLUSION_DISABLE;
+
+      if (IS_DEBUG_OSPF_EVENT)
+	zlog_debug ("Area[%s]: Configured with mt-default-exclusion disabled", 
+		    inet_ntoa (area->area_id) );
+
+      for (node = listhead (area->oiflist); node; node = listnextnode (node))
+	if ((oi = listgetdata (node)) != NULL)
+	  {
+	    if (oi->nbr_self != NULL)
+	      {
+		UNSET_FLAG (oi->nbr_self->options, OSPF_OPTION_MT);
+	      }
+	    /*
+	     * unconditionally deconfigure mt 0; it isn't valid 
+	     * when mt-default-exclusion is disabled
+	     */
+	    ospf_if_deconfigure_mt (oi->ifp, 0);
+	  }
+    }
 
   return 1;
 }

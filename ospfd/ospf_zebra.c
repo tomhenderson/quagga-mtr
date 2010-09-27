@@ -344,6 +344,9 @@ ospf_zebra_add (struct prefix_ipv4 *p, struct ospf_route *or)
       SET_FLAG (message, ZAPI_MESSAGE_NEXTHOP);
       SET_FLAG (message, ZAPI_MESSAGE_METRIC);
 
+      if (or->mt_id != OSPF_NO_MT)
+        SET_FLAG (message, ZAPI_MESSAGE_MT_ID);
+
       /* Distance value. */
       distance = ospf_distance_apply (p, or);
       if (distance)
@@ -387,10 +390,11 @@ ospf_zebra_add (struct prefix_ipv4 *p, struct ospf_route *or)
           if (IS_DEBUG_OSPF (zebra, ZEBRA_REDISTRIBUTE))
             {
 	      char buf[2][INET_ADDRSTRLEN];
-	      zlog_debug("Zebra: Route add %s/%d nexthop %s",
+	      zlog_debug("Zebra: Route add %s/%d mt-id %d nexthop %s",
 			 inet_ntop(AF_INET, &p->prefix,
 				   buf[0], sizeof(buf[0])),
 			 p->prefixlen,
+                         or->mt_id,
 			 inet_ntop(AF_INET, &path->nexthop,
 				   buf[1], sizeof(buf[1])));
             }
@@ -407,6 +411,10 @@ ospf_zebra_add (struct prefix_ipv4 *p, struct ospf_route *or)
           else
             stream_putl (s, or->cost);
         }
+      if (CHECK_FLAG (message, ZAPI_MESSAGE_MT_ID))
+        stream_putc (s, or->mt_id);
+      else
+        stream_putc (s, 0);
 
       stream_putw_at (s, 0, stream_get_endp (s));
 
@@ -429,6 +437,12 @@ ospf_zebra_delete (struct prefix_ipv4 *p, struct ospf_route *or)
       api.message = 0;
       api.ifindex_num = 0;
       api.nexthop_num = 0;
+
+      if (or->mt_id != OSPF_NO_MT)
+        {
+          SET_FLAG (api.message, ZAPI_MESSAGE_MT_ID);
+          api.mt_id = or->mt_id;
+        }
 
       for (ALL_LIST_ELEMENTS (or->paths, node, nnode, path))
         {
@@ -457,17 +471,18 @@ ospf_zebra_delete (struct prefix_ipv4 *p, struct ospf_route *or)
           if (IS_DEBUG_OSPF (zebra, ZEBRA_REDISTRIBUTE) && api.nexthop_num)
             {
 	      char buf[2][INET_ADDRSTRLEN];
-	      zlog_debug("Zebra: Route delete %s/%d nexthop %s",
+	      zlog_debug("Zebra: Route delete %s/%d mt-id %d nexthop %s",
 			 inet_ntop(AF_INET, &p->prefix, buf[0], sizeof(buf[0])),
 			 p->prefixlen,
+                         or->mt_id,
 			 inet_ntop(AF_INET, *api.nexthop,
 				   buf[1], sizeof(buf[1])));
             }
           if (IS_DEBUG_OSPF (zebra, ZEBRA_REDISTRIBUTE) && api.ifindex_num)
             {
-              zlog_debug ("Zebra: Route delete %s/%d ifindex %d",
+              zlog_debug ("Zebra: Route delete %s/%d mt-id %d ifindex %d",
                          inet_ntoa (p->prefix),
-                         p->prefixlen, *api.ifindex);
+                         p->prefixlen, or->mt_id, *api.ifindex);
             }
         }
     }

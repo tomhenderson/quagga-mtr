@@ -102,6 +102,33 @@ ospf_if_recalculate_output_cost (struct interface *ifp)
     }
 }
 
+void ospf_if_deconfigure_mt ( struct interface *ifp, u_int32_t mt_id )
+{
+  if (ifp)
+    {
+      struct ospf_if_params *params = IF_DEF_PARAMS (ifp);
+      if (params)
+	{
+	  int i;
+
+	  /* deconfigure the given mt */
+	  params->mt_map[mt_id / OSPF_NUM_MT_MAP_ENTRIES] 
+	    &= ~(1 << mt_id % OSPF_NUM_MT_MAP_ENTRIES);
+	  params->mt_metric[mt_id] = 0;
+
+	  for (i = 0; i < OSPF_UINT32_SIZE_MT_BIT_VECTOR; i++) 
+	    {
+	      if (params->mt_map[i]) { break; }
+	    }
+	  if (i == OSPF_UINT32_SIZE_MT_BIT_VECTOR)
+	    {
+	      UNSET_IF_PARAM (params, mt_map); 
+	    }
+	}
+    }
+  return;
+}
+
 /* Simulate down/up on the interface.  This is needed, for example, when 
    the MTU changes. */
 void
@@ -531,6 +558,7 @@ ospf_new_if_params (void)
   UNSET_IF_PARAM (oip, auth_simple);
   UNSET_IF_PARAM (oip, auth_crypt);
   UNSET_IF_PARAM (oip, auth_type);
+  UNSET_IF_PARAM (oip, mt_map);
 
   oip->auth_crypt = list_new ();
   
@@ -572,6 +600,7 @@ ospf_free_if_params (struct interface *ifp, struct in_addr addr)
       !OSPF_IF_PARAM_CONFIGURED (oip, type) &&
       !OSPF_IF_PARAM_CONFIGURED (oip, auth_simple) &&
       !OSPF_IF_PARAM_CONFIGURED (oip, auth_type) &&
+      !OSPF_IF_PARAM_CONFIGURED (oip, mt_map) &&
       listcount (oip->auth_crypt) == 0)
     {
       ospf_del_if_params (oip);
@@ -674,6 +703,9 @@ ospf_if_new_hook (struct interface *ifp)
   
   SET_IF_PARAM (IF_DEF_PARAMS (ifp), auth_type);
   IF_DEF_PARAMS (ifp)->auth_type = OSPF_AUTH_NOTSET;
+
+  memset (IF_DEF_PARAMS (ifp)->mt_map, 0, sizeof (u_int32_t));
+  memset (IF_DEF_PARAMS (ifp)->mt_metric, 0, sizeof (u_int16_t));
   
 #ifdef HAVE_OPAQUE_LSA
   rc = ospf_opaque_new_if (ifp);

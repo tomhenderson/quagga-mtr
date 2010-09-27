@@ -73,6 +73,12 @@ struct ospf_if_params
   
   DECLARE_IF_PARAM (struct list *, auth_crypt);    /* List of Auth cryptographic data. */
   DECLARE_IF_PARAM (int, auth_type);               /* OSPF authentication type */
+
+#define OSPF_NUM_MT_MAP_ENTRIES (sizeof(u_int32_t) * 8)
+  /* NOTE: possibly change data representation to use a sorted list */
+  u_int32_t  mt_map[OSPF_UINT32_SIZE_MT_BIT_VECTOR]; /* list of configured MT_IDs */
+  u_int16_t  mt_metric[OSPF_MAX_NUM_MT_IDS];         /* mt associated metric      */
+  u_char     mt_map__config:1;
 };
 
 enum
@@ -273,6 +279,7 @@ extern void ospf_if_reset_variables (struct ospf_interface *);
 extern int ospf_if_is_enable (struct ospf_interface *);
 extern int ospf_if_get_output_cost (struct ospf_interface *);
 extern void ospf_if_recalculate_output_cost (struct interface *);
+extern void ospf_if_deconfigure_mt ( struct interface *, u_int32_t);
 
 /* Simulate down/up on the interface. */
 extern void ospf_if_reset (struct interface *);

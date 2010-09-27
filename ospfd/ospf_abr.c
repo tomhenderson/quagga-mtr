@@ -1738,7 +1738,7 @@ ospf_abr_manage_discard_routes (struct ospf *ospf)
 	if (CHECK_FLAG (range->flags, OSPF_AREA_RANGE_ADVERTISE))
 	  {
 	    if (range->specifics)
-	      ospf_add_discard_route (ospf->new_table, area,
+	      ospf_add_discard_route (ospf->new_table[0], area,
 				      (struct prefix_ipv4 *) &rn->p);
 	    else
 	      ospf_delete_discard_route ((struct prefix_ipv4 *) &rn->p);
@@ -1840,7 +1840,7 @@ ospf_abr_task (struct ospf *ospf)
   if (IS_DEBUG_OSPF_EVENT)
     zlog_debug ("ospf_abr_task(): Start");
 
-  if (ospf->new_table == NULL || ospf->new_rtrs == NULL)
+  if (ospf->new_table[0] == NULL || ospf->new_rtrs[0] == NULL)
     {
       if (IS_DEBUG_OSPF_EVENT)
 	zlog_debug ("ospf_abr_task(): Routing tables are not yet ready");
@@ -1859,11 +1859,11 @@ ospf_abr_task (struct ospf *ospf)
     {
       if (IS_DEBUG_OSPF_EVENT)
 	zlog_debug ("ospf_abr_task(): process network RT");
-      ospf_abr_process_network_rt (ospf, ospf->new_table);
+      ospf_abr_process_network_rt (ospf, ospf->new_table[0]);
 
       if (IS_DEBUG_OSPF_EVENT)
 	zlog_debug ("ospf_abr_task(): process router RT");
-      ospf_abr_process_router_rt (ospf, ospf->new_rtrs);
+      ospf_abr_process_router_rt (ospf, ospf->new_rtrs[0]);
 
       if (IS_DEBUG_OSPF_EVENT)
 	zlog_debug ("ospf_abr_task(): announce aggregates");

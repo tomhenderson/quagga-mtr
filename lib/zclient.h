@@ -86,6 +86,7 @@ struct zclient
 #define ZAPI_MESSAGE_IFINDEX  0x02
 #define ZAPI_MESSAGE_DISTANCE 0x04
 #define ZAPI_MESSAGE_METRIC   0x08
+#define ZAPI_MESSAGE_MT_ID   0x10
 
 /* Zserv protocol message header */
 struct zserv_header
@@ -117,6 +118,9 @@ struct zapi_ipv4
   u_char distance;
 
   u_int32_t metric;
+
+  u_char mt_id; /* Multi-Topology ID */
+
 };
 
 /* Prototypes of zebra client service functions. */

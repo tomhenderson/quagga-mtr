@@ -783,6 +783,7 @@ netlink_route_change (struct sockaddr_nl *snl, struct nlmsghdr *h)
 
   /* Connected route. */
   if (IS_ZEBRA_DEBUG_KERNEL)
+    zlog_debug ("netlink_route_change MT table %d", rtm->rtm_table);
     zlog_debug ("%s %s %s proto %s",
                h->nlmsg_type ==
                RTM_NEWROUTE ? "RTM_NEWROUTE" : "RTM_DELROUTE",
@@ -796,10 +797,13 @@ netlink_route_change (struct sockaddr_nl *snl, struct nlmsghdr *h)
     }
 
   table = rtm->rtm_table;
+#if 0
+/* XXX need to support all tables for MTR */
   if (table != RT_TABLE_MAIN && table != zebrad.rtm_table_default)
     {
       return 0;
     }
+#endif
 
   len = h->nlmsg_len - NLMSG_LENGTH (sizeof (struct rtmsg));
   if (len < 0)
@@ -1317,6 +1321,10 @@ netlink_route_multipath (int cmd, struct prefix *p, struct rib *rib,
   req.n.nlmsg_type = cmd;
   req.r.rtm_family = family;
   req.r.rtm_table = rib->table;
+  if (IS_ZEBRA_DEBUG_KERNEL)
+    {
+      zlog_debug ("netlink_route_multipath() MT table %d", rib->table);
+    }
   req.r.rtm_dst_len = p->prefixlen;
   req.r.rtm_protocol = RTPROT_ZEBRA;
   req.r.rtm_scope = RT_SCOPE_UNIVERSE;

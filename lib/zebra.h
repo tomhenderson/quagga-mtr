@@ -525,6 +525,9 @@ extern const char *zserv_command_string (unsigned int command);
 #define ZEBRA_IBGP_DISTANCE_DEFAULT      200
 #define ZEBRA_EBGP_DISTANCE_DEFAULT       20
 
+/* Default base table id for multi-topology routing extension */
+#define ZEBRA_MT_ROUTE_BASE_DEFAULT        0
+
 /* Flag manipulation macros. */
 #define CHECK_FLAG(V,F)      ((V) & (F))
 #define SET_FLAG(V,F)        (V) |= (F)

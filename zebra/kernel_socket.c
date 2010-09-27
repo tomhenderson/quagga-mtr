@@ -900,10 +900,10 @@ rtm_read (struct rt_msghdr *rtm)
           || rtm->rtm_type == RTM_ADD
           || rtm->rtm_type == RTM_CHANGE)
 	rib_add_ipv4 (ZEBRA_ROUTE_KERNEL, zebra_flags, 
-		      &p, &gate.sin.sin_addr, NULL, 0, 0, 0, 0);
+		      &p, &gate.sin.sin_addr, NULL, 0, rtm->rtm_table, 0, 0);
       else
 	rib_delete_ipv4 (ZEBRA_ROUTE_KERNEL, zebra_flags, 
-		      &p, &gate.sin.sin_addr, 0, 0);
+		      &p, &gate.sin.sin_addr, 0, rtm->rtm_table);
     }
 #ifdef HAVE_IPV6
   if (dest.sa.sa_family == AF_INET6)
@@ -942,10 +942,10 @@ rtm_read (struct rt_msghdr *rtm)
           || rtm->rtm_type == RTM_ADD
           || rtm->rtm_type == RTM_CHANGE)
 	rib_add_ipv6 (ZEBRA_ROUTE_KERNEL, zebra_flags,
-		      &p, &gate.sin6.sin6_addr, ifindex, 0, 0, 0);
+		      &p, &gate.sin6.sin6_addr, ifindex, rtm->rtm_table, 0, 0);
       else
 	rib_delete_ipv6 (ZEBRA_ROUTE_KERNEL, zebra_flags,
-			 &p, &gate.sin6.sin6_addr, ifindex, 0);
+			 &p, &gate.sin6.sin6_addr, ifindex, rtm->rtm_table);
     }
 #endif /* HAVE_IPV6 */
 }

@@ -110,6 +110,9 @@ struct ospf_route
   /* List of Paths. */
   struct list *paths;
 
+  /* RFC 4915 Multi-Topology ID. */
+  u_int8_t mt_id;               /* XXX alignment implications of u_int8_t? */
+
   /* Link State Cost. */
   u_int32_t cost;		/* i.e. metric. */
 
@@ -129,18 +132,18 @@ extern void ospf_route_free (struct ospf_route *);
 extern void ospf_route_delete (struct route_table *);
 extern void ospf_route_table_free (struct route_table *);
 
-extern void ospf_route_install (struct ospf *, struct route_table *);
+extern void ospf_route_install (struct ospf *, u_int8_t, struct route_table *);
 extern void ospf_route_table_dump (struct route_table *);
 
 extern void ospf_intra_add_router (struct route_table *, struct vertex *,
-				   struct ospf_area *);
+				   struct ospf_area *, u_int8_t mt_id);
 
 extern void ospf_intra_add_transit (struct route_table *, struct vertex *,
-				    struct ospf_area *);
+				    struct ospf_area *, u_int8_t mt_id);
 
 extern void ospf_intra_add_stub (struct route_table *,
 				 struct router_lsa_link *, struct vertex *,
-				 struct ospf_area *,
+				 struct ospf_area *, u_int8_t mt_id,
 				 int parent_is_root);
 
 extern int ospf_route_cmp (struct ospf *, struct ospf_route *,

@@ -278,23 +278,27 @@ ospf_vertex_add_parent (struct vertex *v)
 }
 
 static void
-ospf_spf_init (struct ospf_area *area)
+ospf_spf_init (struct ospf_area *area, u_int8_t mt_id)
 {
   struct vertex *v;
   
   /* Create root node. */
   v = ospf_vertex_new (area->router_lsa_self);
   
-  area->spf = v;
+  area->spf[mt_id] = v;
 
-  /* Reset ABR and ASBR router counts. */
-  area->abr_count = 0;
-  area->asbr_count = 0;
+  if (mt_id == 0)
+    {
+      /* Reset ABR and ASBR router counts. */
+      area->abr_count = 0;
+      area->asbr_count = 0;
+    }
 }
 
 /* return index of link back to V from W, or -1 if no link found */
 static int
-ospf_lsa_has_link (struct lsa_header *w, struct lsa_header *v)
+ospf_lsa_has_link (struct ospf_area *area, struct lsa_header *w, 
+                   struct lsa_header *v, u_int8_t mt_id)
 {
   unsigned int i, length;
   struct router_lsa *rl;
@@ -318,21 +322,34 @@ ospf_lsa_has_link (struct lsa_header *w, struct lsa_header *v)
   /* In case of W is Router LSA. */
   if (w->type == OSPF_ROUTER_LSA)
     {
+      int link_len;
+      char *ll;
+      struct router_lsa_link *l;
+
       rl = (struct router_lsa *) w;
+      ll = (char *)rl->link;
 
-      length = ntohs (w->length);
+      /* length is 20 - lsa hdr, 4 - non-link info in lsa body */
+      length = ntohs (rl->header.length) - 24; 
 
-      for (i = 0;
-           i < ntohs (rl->links) && length >= sizeof (struct router_lsa);
-           i++, length -= 12)
+      if (IS_DEBUG_OSPF_EVENT)
         {
-          switch (rl->link[i].type)
+          zlog_debug ("ospf_lsa_has_link: length %d num_links: %d", 
+            length, ntohs(rl->links));
+        }
+      for (i = link_len = 0;
+           i < ntohs (rl->links) && length >= 0;
+           i++, ll += link_len, length -= link_len)
+        {
+          l = (struct router_lsa_link *)ll;
+          switch (l->m[0].type)
             {
             case LSA_LINK_TYPE_POINTOPOINT:
             case LSA_LINK_TYPE_VIRTUALLINK:
               /* Router LSA ID. */
               if (v->type == OSPF_ROUTER_LSA &&
-                  IPV4_ADDR_SAME (&rl->link[i].link_id, &v->id))
+                  IPV4_ADDR_SAME (&l->link_id, &v->id)
+                  && ospf_lsa_link_mtid_exists (area, l, mt_id))
                 {
                   return i;
                 }
@@ -340,24 +357,25 @@ ospf_lsa_has_link (struct lsa_header *w, struct lsa_header *v)
             case LSA_LINK_TYPE_TRANSIT:
               /* Network LSA ID. */
               if (v->type == OSPF_NETWORK_LSA &&
-                  IPV4_ADDR_SAME (&rl->link[i].link_id, &v->id))
+                  IPV4_ADDR_SAME (&l->link_id, &v->id)
+                  && ospf_lsa_link_mtid_exists (area, l, mt_id))
                 {
                   return i;
                 }
               break;
             case LSA_LINK_TYPE_STUB:
               /* Stub can't lead anywhere, carry on */
-              continue;
+              break;
             default:
               break;
             }
+         link_len = OSPF_ROUTER_LSA_LINK_SIZE +
+            OSPF_ROUTER_LSA_MTID_SIZE * l->m[0].tos_count;
         }
     }
   return -1;
 }
 
-#define ROUTER_LSA_MIN_SIZE 12
-#define ROUTER_LSA_TOS_SIZE 4
 
 /* Find the next link after prev_link from v to w.  If prev_link is
  * NULL, return the first link from v to w.  Ignore stub and virtual links;
@@ -380,8 +398,8 @@ ospf_get_next_link (struct vertex *v, struct vertex *w,
   else
     {
       p = (u_char *) prev_link;
-      p += (ROUTER_LSA_MIN_SIZE +
-            (prev_link->m[0].tos_count * ROUTER_LSA_TOS_SIZE));
+      p += (OSPF_ROUTER_LSA_LINK_SIZE +
+            (prev_link->m[0].tos_count * OSPF_ROUTER_LSA_MTID_SIZE));
     }
 
   lim = ((u_char *) v->lsa) + ntohs (v->lsa->length);
@@ -390,7 +408,7 @@ ospf_get_next_link (struct vertex *v, struct vertex *w,
     {
       l = (struct router_lsa_link *) p;
 
-      p += (ROUTER_LSA_MIN_SIZE + (l->m[0].tos_count * ROUTER_LSA_TOS_SIZE));
+      p += (OSPF_ROUTER_LSA_LINK_SIZE + (l->m[0].tos_count * OSPF_ROUTER_LSA_MTID_SIZE));
 
       if (l->m[0].type != lsa_type)
         continue;
@@ -421,9 +439,9 @@ ospf_spf_flush_parents (struct vertex *w)
  * equal-cost next-hops, adjust list as neccessary.  
  */
 static void
-ospf_spf_add_parent (struct vertex *v, struct vertex *w,
-                     struct vertex_nexthop *newhop,
-                     unsigned int distance)
+ospf_spf_add_parent (struct ospf_area *area, struct vertex *v, 
+                     struct vertex *w, u_int8_t mt_id, 
+                     struct vertex_nexthop *newhop, unsigned int distance)
 {
   struct vertex_parent *vp;
     
@@ -460,7 +478,7 @@ ospf_spf_add_parent (struct vertex *v, struct vertex *w,
     }
   
   /* new parent is <= existing parents, add it to parent list */  
-  vp = vertex_parent_new (v, ospf_lsa_has_link (w->lsa, v->lsa), newhop);
+  vp = vertex_parent_new (v, ospf_lsa_has_link (area, w->lsa, v->lsa, mt_id), newhop);
   listnode_add (w->parents, vp);
 
   return;
@@ -478,9 +496,9 @@ ospf_spf_add_parent (struct vertex *v, struct vertex *w,
  * provided distance as appropriate.
  */
 static unsigned int
-ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
-                          struct vertex *w, struct router_lsa_link *l,
-                          unsigned int distance)
+ospf_nexthop_calculation (struct ospf_area *area, u_int8_t mt_id, 
+                          struct vertex *v, struct vertex *w, 
+                          struct router_lsa_link *l, unsigned int distance)
 {
   struct listnode *node, *nnode;
   struct vertex_nexthop *nh;
@@ -496,7 +514,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
       zlog_debug ("V->W distance: %d", distance);
     }
 
-  if (v == area->spf)
+  if (v == area->spf[mt_id])
     {      
       /* 16.1.1 para 4.  In the first case, the parent vertex (V) is the
 	 root (the calculating router itself).  This means that the 
@@ -595,7 +613,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
                   nh = vertex_nexthop_new ();
                   nh->oi = oi;
                   nh->router = l2->link_data;
-                  ospf_spf_add_parent (v, w, nh, distance);
+                  ospf_spf_add_parent (area, v, w, mt_id, nh, distance);
                   return 1;
                 }
               else
@@ -621,7 +639,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
                   nh = vertex_nexthop_new ();
                   nh->oi = vl_data->nexthop.oi;
                   nh->router = vl_data->nexthop.router;
-                  ospf_spf_add_parent (v, w, nh, distance);
+                  ospf_spf_add_parent (area, v, w, mt_id, nh, distance);
                   return 1;
                 }
               else
@@ -639,7 +657,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
               nh = vertex_nexthop_new ();
               nh->oi = oi;
               nh->router.s_addr = 0;
-              ospf_spf_add_parent (v, w, nh, distance);
+              ospf_spf_add_parent (area, v, w, mt_id, nh, distance);
               return 1;
             }
         }
@@ -653,7 +671,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
       /* See if any of V's parents are the root. */
       for (ALL_LIST_ELEMENTS (v->parents, node, nnode, vp))
         {
-          if (vp->parent == area->spf) /* connects to root? */
+          if (vp->parent == area->spf[mt_id]) /* connects to root? */
 	    {
 	      /* 16.1.1 para 5. ...the parent vertex is a network that
 	       * directly connects the calculating router to the destination
@@ -674,7 +692,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
 		  nh->oi = vp->nexthop->oi;
 		  nh->router = l->link_data;
 		  added = 1;
-                  ospf_spf_add_parent (v, w, nh, distance);
+                  ospf_spf_add_parent (area, v, w, mt_id, nh, distance);
                 }
             }
         }
@@ -706,7 +724,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
   for (ALL_LIST_ELEMENTS (v->parents, node, nnode, vp))
     {
       added = 1;
-      ospf_spf_add_parent (v, w, vp->nexthop, distance);
+      ospf_spf_add_parent (area, v, w, mt_id, vp->nexthop, distance);
     }
   
   return added;
@@ -719,7 +737,7 @@ ospf_nexthop_calculation (struct ospf_area *area, struct vertex *v,
  */
 static void
 ospf_spf_next (struct vertex *v, struct ospf_area *area,
-	       struct pqueue * candidate)
+	       u_int8_t mt_id, struct pqueue * candidate)
 {
   struct ospf_lsa *w_lsa = NULL;
   u_char *p;
@@ -755,8 +773,8 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
         {
           l = (struct router_lsa_link *) p;
 
-          p += (ROUTER_LSA_MIN_SIZE +
-                (l->m[0].tos_count * ROUTER_LSA_TOS_SIZE));
+          p += (OSPF_ROUTER_LSA_LINK_SIZE +
+                (l->m[0].tos_count * OSPF_ROUTER_LSA_MTID_SIZE));
 
           /* (a) If this is a link to a stub network, examine the next
              link in V's LSA.  Links to stub networks will be
@@ -769,7 +787,16 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
            * for local links (a stub-routed router still wants to
            * calculate tree, so must follow its own links).
            */
-          if ((v != area->spf) && l->m[0].metric >= OSPF_OUTPUT_COST_INFINITE)
+          if ((v != area->spf[mt_id]) && 
+              (ospf_lsa_link_mtid_metric (area, l, mt_id) >=
+              OSPF_OUTPUT_COST_INFINITE))
+            continue;
+
+          /* if this link doesn't have the given mt_id
+           * associated with it, skip over it and check
+           * the next link
+           */
+          if (!ospf_lsa_link_mtid_exists (area, l, mt_id))
             continue;
 
           /* (b) Otherwise, W is a transit vertex (router or transit
@@ -841,10 +868,10 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
           continue;
         }
 
-      if (ospf_lsa_has_link (w_lsa->data, v->lsa) < 0 )
+      if (ospf_lsa_has_link (area, w_lsa->data, v->lsa, mt_id) < 0 )
         {
           if (IS_DEBUG_OSPF_EVENT)
-            zlog_debug ("The LSA doesn't have a link back");
+            zlog_debug ("The LSA doesn't have a link back for mt_id %d", mt_id);
           continue;
         }
 
@@ -865,7 +892,7 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
 
       /* calculate link cost D. */
       if (v->lsa->type == OSPF_ROUTER_LSA)
-	distance = v->distance + ntohs (l->m[0].metric);
+	distance = v->distance + ospf_lsa_link_mtid_metric (area, l, mt_id);
       else /* v is not a Router-LSA */
 	distance = v->distance;
 
@@ -876,7 +903,7 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
           w = ospf_vertex_new (w_lsa);
 
           /* Calculate nexthop to W. */
-          if (ospf_nexthop_calculation (area, v, w, l, distance))
+          if (ospf_nexthop_calculation (area, mt_id, v, w, l, distance))
             pqueue_enqueue (w, candidate);
           else if (IS_DEBUG_OSPF_EVENT)
             zlog_debug ("Nexthop Calc failed");
@@ -896,7 +923,7 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
             {
 	      /* Found an equal-cost path to W.  
                * Calculate nexthop of to W from V. */
-              ospf_nexthop_calculation (area, v, w, l, distance);
+              ospf_nexthop_calculation (area, mt_id, v, w, l, distance);
             }
            /* less than. */
 	  else
@@ -906,7 +933,7 @@ ospf_spf_next (struct vertex *v, struct ospf_area *area,
                * valid nexthop it will call spf_add_parents, which
                * will flush the old parents
                */
-              if (ospf_nexthop_calculation (area, v, w, l, distance))
+              if (ospf_nexthop_calculation (area, mt_id, v, w, l, distance))
                 /* Decrease the key of the node in the heap.
                  * trickle-sort it up towards root, just in case this
                  * node should now be the new root due the cost change. 
@@ -956,7 +983,8 @@ ospf_spf_dump (struct vertex *v, int i)
 
 /* Second stage of SPF calculation. */
 static void
-ospf_spf_process_stubs (struct ospf_area *area, struct vertex *v,
+ospf_spf_process_stubs (struct ospf_area *area, u_int8_t mt_id, 
+                        struct vertex *v,
                         struct route_table *rt,
                         int parent_is_root)
 {
@@ -964,8 +992,8 @@ ospf_spf_process_stubs (struct ospf_area *area, struct vertex *v,
   struct vertex *child;
 
   if (IS_DEBUG_OSPF_EVENT)
-    zlog_debug ("ospf_process_stub():processing stubs for area %s",
-               inet_ntoa (area->area_id));
+    zlog_debug ("ospf_process_stub():processing stubs for area %s mt-id %d",
+               inet_ntoa (area->area_id), mt_id);
   if (v->type == OSPF_VERTEX_ROUTER)
     {
       u_char *p;
@@ -989,11 +1017,15 @@ ospf_spf_process_stubs (struct ospf_area *area, struct vertex *v,
         {
           l = (struct router_lsa_link *) p;
 
-          p += (ROUTER_LSA_MIN_SIZE +
-                (l->m[0].tos_count * ROUTER_LSA_TOS_SIZE));
+          p += (OSPF_ROUTER_LSA_LINK_SIZE +
+                (l->m[0].tos_count * OSPF_ROUTER_LSA_MTID_SIZE));
+   
+          /* Skip link if it doesn't have the given mt_id */
+          if (!ospf_lsa_link_mtid_exists (area, l, mt_id))
+            continue;
 
           if (l->m[0].type == LSA_LINK_TYPE_STUB)
-            ospf_intra_add_stub (rt, l, v, area, parent_is_root);
+            ospf_intra_add_stub (rt, l, v, area, mt_id, parent_is_root);
         }
     }
 
@@ -1008,12 +1040,12 @@ ospf_spf_process_stubs (struct ospf_area *area, struct vertex *v,
        * should have 'parent_is_root' set, including those 
        * connected via a network vertex.
        */
-      if (area->spf == v)
+      if (area->spf[mt_id] == v)
         parent_is_root = 1;
       else if (v->type == OSPF_VERTEX_ROUTER)
         parent_is_root = 0;
         
-      ospf_spf_process_stubs (area, child, rt, parent_is_root);
+      ospf_spf_process_stubs (area, mt_id, child, rt, parent_is_root);
 
       SET_FLAG (child->flags, OSPF_VERTEX_PROCESSED);
     }
@@ -1105,9 +1137,10 @@ ospf_rtrs_print (struct route_table *rtrs)
   zlog_debug ("ospf_rtrs_print() end");
 }
 
-/* Calculating the shortest-path tree for an area. */
+/* Calculating the shortest-path tree for an area, for a given mt-id. */
 static void
-ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
+ospf_spf_calculate (struct ospf_area *area, u_int8_t mt_id, 
+                    struct route_table *new_table, 
                     struct route_table *new_rtrs)
 {
   struct pqueue *candidate;
@@ -1116,8 +1149,8 @@ ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
   if (IS_DEBUG_OSPF_EVENT)
     {
       zlog_debug ("ospf_spf_calculate: Start");
-      zlog_debug ("ospf_spf_calculate: running Dijkstra for area %s",
-                 inet_ntoa (area->area_id));
+      zlog_debug ("ospf_spf_calculate: running Dijkstra for area %s mt-id %d",
+                 inet_ntoa (area->area_id), mt_id);
     }
 
   /* Check router-lsa-self.  If self-router-lsa is not yet allocated,
@@ -1144,8 +1177,8 @@ ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
 
   /* Initialize the shortest-path tree to only the root (which is the
      router doing the calculation). */
-  ospf_spf_init (area);
-  v = area->spf;
+  ospf_spf_init (area, mt_id);
+  v = area->spf[mt_id];
   /* Set LSA position to LSA_SPF_IN_SPFTREE. This vertex is the root of the
    * spanning tree. */
   *(v->stat) = LSA_SPF_IN_SPFTREE;
@@ -1157,7 +1190,7 @@ ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
   for (;;)
     {
       /* RFC2328 16.1. (2). */
-      ospf_spf_next (v, area, candidate);
+      ospf_spf_next (v, area, mt_id, candidate);
 
       /* RFC2328 16.1. (3). */
       /* If at this step the candidate list is empty, the shortest-
@@ -1179,9 +1212,9 @@ ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
 
       /* RFC2328 16.1. (4). */
       if (v->type == OSPF_VERTEX_ROUTER)
-        ospf_intra_add_router (new_rtrs, v, area);
+        ospf_intra_add_router (new_rtrs, v, area, mt_id);
       else
-        ospf_intra_add_transit (new_table, v, area);
+        ospf_intra_add_transit (new_table, v, area, mt_id);
 
       /* RFC2328 16.1. (5). */
       /* Iterate the algorithm by returning to Step 2. */
@@ -1190,22 +1223,22 @@ ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
 
   if (IS_DEBUG_OSPF_EVENT)
     {
-      ospf_spf_dump (area->spf, 0);
+      ospf_spf_dump (area->spf[mt_id], 0);
       ospf_route_table_dump (new_table);
     }
 
   /* Second stage of SPF calculation procedure's  */
-  ospf_spf_process_stubs (area, area->spf, new_table, 0);
+  ospf_spf_process_stubs (area, mt_id, area->spf[mt_id], new_table, 0);
 
   /* Free candidate queue. */
   pqueue_delete (candidate);
   
-  ospf_vertex_dump (__func__, area->spf, 0, 1);
+  ospf_vertex_dump (__func__, area->spf[mt_id], 0, 1);
   /* Free nexthop information, canonical versions of which are attached
    * the first level of router vertices attached to the root vertex, see
    * ospf_nexthop_calculation.
    */
-  ospf_canonical_nexthops_free (area->spf);
+  ospf_canonical_nexthops_free (area->spf[mt_id]);
   
   /* Free SPF vertices, but not the list. List has ospf_vertex_free
    * as deconstructor.
@@ -1218,8 +1251,8 @@ ospf_spf_calculate (struct ospf_area *area, struct route_table *new_table,
   quagga_gettime (QUAGGA_CLK_MONOTONIC, &area->ospf->ts_spf);
 
   if (IS_DEBUG_OSPF_EVENT)
-    zlog_debug ("ospf_spf_calculate: Stop. %ld vertices",
-                mtype_stats_alloc(MTYPE_OSPF_VERTEX));
+    zlog_debug ("ospf_spf_calculate topology %d: Stop. %ld vertices",
+                mt_id, mtype_stats_alloc(MTYPE_OSPF_VERTEX));
 }
 
 /* Timer for SPF calculation. */
@@ -1230,66 +1263,86 @@ ospf_spf_calculate_timer (struct thread *thread)
   struct route_table *new_table, *new_rtrs;
   struct ospf_area *area;
   struct listnode *node, *nnode;
+  uint8_t mt_id = 0;
 
   if (IS_DEBUG_OSPF_EVENT)
     zlog_debug ("SPF: Timer (SPF calculation expire)");
 
   ospf->t_spf_calc = NULL;
 
-  /* Allocate new table tree. */
-  new_table = route_table_init ();
-  new_rtrs = route_table_init ();
-
-  ospf_vl_unapprove (ospf);
-
-  /* Calculate SPF for each area. */
-  for (ALL_LIST_ELEMENTS (ospf->areas, node, nnode, area))
-    {
-      /* Do backbone last, so as to first discover intra-area paths
-       * for any back-bone virtual-links
+  /* For each mt_id */
+  for (mt_id = 0; mt_id < OSPF_MAX_NUM_MT_IDS; mt_id++)
+    { 
+      /*
+       * if the backbone's router-lsa-self doesn't contain at least one
+       * link with the given mt-id, there can be no tree rooted
+       * here associated with that mt-id
        */
-      if (ospf->backbone && ospf->backbone == area)
-        continue;
+      if (ospf->backbone && ospf->backbone->router_lsa_self 
+        && ! ospf_lsa_contains_mtid (ospf->backbone, ospf->backbone->router_lsa_self, mt_id))
+        {
+          if (IS_DEBUG_OSPF_EVENT)
+            zlog_debug ("ospf_spf_calculate mt-id %d: "
+                        "Skip area %s's calculation -- backbone "
+                        "router_lsa_self contains no link with mt-id %d",
+                        mt_id, inet_ntoa (area->area_id), mt_id);
+          continue;
+        }
+      /* Allocate new table tree. */
+      new_table = route_table_init ();
+      new_rtrs = route_table_init ();
+    
+      ospf_vl_unapprove (ospf);
+    
+      /* Calculate SPF for each area. */
+      for (ALL_LIST_ELEMENTS (ospf->areas, node, nnode, area))
+        {
+          /* Do backbone last, so as to first discover intra-area paths
+           * for any back-bone virtual-links
+           */
+          if (ospf->backbone && ospf->backbone == area)
+            continue;
+          
+          ospf_spf_calculate (area, mt_id, new_table, new_rtrs);
+        }
       
-      ospf_spf_calculate (area, new_table, new_rtrs);
+      /* SPF for backbone, if required */
+      if (ospf->backbone)
+        ospf_spf_calculate (ospf->backbone, mt_id, new_table, new_rtrs);
+      
+      ospf_vl_shut_unapproved (ospf);
+    
+      ospf_ia_routing (ospf, new_table, new_rtrs);
+    
+      ospf_prune_unreachable_networks (new_table);
+      ospf_prune_unreachable_routers (new_rtrs);
+    
+      /* AS-external-LSA calculation should not be performed here. */
+    
+      /* If new Router Route is installed,
+         then schedule re-calculate External routes. */
+      if (1)
+        ospf_ase_calculate_schedule (ospf);
+    
+      ospf_ase_calculate_timer_add (ospf);
+    
+      /* Update routing table. */
+      ospf_route_install (ospf, mt_id, new_table);
+    
+      /* Update ABR/ASBR routing table */
+      if (ospf->old_rtrs[mt_id])
+        {
+          /* old_rtrs's node holds linked list of ospf_route. --kunihiro. */
+          /* ospf_route_delete (ospf->old_rtrs); */
+          ospf_rtrs_free (ospf->old_rtrs[mt_id]);
+        }
+    
+      ospf->old_rtrs[mt_id] = ospf->new_rtrs[mt_id];
+      ospf->new_rtrs[mt_id] = new_rtrs;
+    
+      if (IS_OSPF_ABR (ospf))
+        ospf_abr_task (ospf);
     }
-  
-  /* SPF for backbone, if required */
-  if (ospf->backbone)
-    ospf_spf_calculate (ospf->backbone, new_table, new_rtrs);
-  
-  ospf_vl_shut_unapproved (ospf);
-
-  ospf_ia_routing (ospf, new_table, new_rtrs);
-
-  ospf_prune_unreachable_networks (new_table);
-  ospf_prune_unreachable_routers (new_rtrs);
-
-  /* AS-external-LSA calculation should not be performed here. */
-
-  /* If new Router Route is installed,
-     then schedule re-calculate External routes. */
-  if (1)
-    ospf_ase_calculate_schedule (ospf);
-
-  ospf_ase_calculate_timer_add (ospf);
-
-  /* Update routing table. */
-  ospf_route_install (ospf, new_table);
-
-  /* Update ABR/ASBR routing table */
-  if (ospf->old_rtrs)
-    {
-      /* old_rtrs's node holds linked list of ospf_route. --kunihiro. */
-      /* ospf_route_delete (ospf->old_rtrs); */
-      ospf_rtrs_free (ospf->old_rtrs);
-    }
-
-  ospf->old_rtrs = ospf->new_rtrs;
-  ospf->new_rtrs = new_rtrs;
-
-  if (IS_OSPF_ABR (ospf))
-    ospf_abr_task (ospf);
 
   if (IS_DEBUG_OSPF_EVENT)
     zlog_debug ("SPF: calculation complete");

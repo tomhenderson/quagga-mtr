@@ -311,13 +311,14 @@ ospf_options_dump (u_char options)
 {
   static char buf[OSPF_OPTION_STR_MAXLEN];
 
-  snprintf (buf, OSPF_OPTION_STR_MAXLEN, "*|%s|%s|%s|%s|%s|%s|*",
+  snprintf (buf, OSPF_OPTION_STR_MAXLEN, "*|%s|%s|%s|%s|%s|%s|%s",
 	    (options & OSPF_OPTION_O) ? "O" : "-",
 	    (options & OSPF_OPTION_DC) ? "DC" : "-",
 	    (options & OSPF_OPTION_EA) ? "EA" : "-",
 	    (options & OSPF_OPTION_NP) ? "N/P" : "-",
 	    (options & OSPF_OPTION_MC) ? "MC" : "-",
-	    (options & OSPF_OPTION_E) ? "E" : "-");
+	    (options & OSPF_OPTION_E) ? "E" : "-",
+	    (options & OSPF_OPTION_MT) ? "MT" : "-");
 
   return buf;
 }
@@ -395,7 +396,9 @@ ospf_router_lsa_dump (struct stream *s, u_int16_t length)
 {
   char buf[BUFSIZ];
   struct router_lsa *rl;
-  int i, len;
+  int i, j, len, link_len;
+  char *ll;
+  struct router_lsa_link *l;
 
   rl = (struct router_lsa *) STREAM_PNT (s);
 
@@ -405,15 +408,24 @@ ospf_router_lsa_dump (struct stream *s, u_int16_t length)
   zlog_debug ("    # links %d", ntohs (rl->links));
 
   len = ntohs (rl->header.length) - OSPF_LSA_HEADER_SIZE - 4;
-  for (i = 0; len > 0; i++)
-    {
-      zlog_debug ("    Link ID %s", inet_ntoa (rl->link[i].link_id));
-      zlog_debug ("    Link Data %s", inet_ntoa (rl->link[i].link_data));
-      zlog_debug ("    Type %d", (u_char) rl->link[i].type);
-      zlog_debug ("    TOS %d", (u_char) rl->link[i].tos);
-      zlog_debug ("    metric %d", ntohs (rl->link[i].metric));
+  ll = (char *)rl->link;
 
-      len -= 12;
+  for (i = 0; i < ntohs( rl->links) && len > 0; len -= link_len, i++)
+    {
+      l = (struct router_lsa_link *)ll;
+
+      zlog_debug ("    Link ID %s", inet_ntoa (l->link_id));
+      zlog_debug ("    Link Data %s", inet_ntoa (l->link_data));
+      zlog_debug ("    Type %d", (u_char) l->m[0].type);
+      zlog_debug ("    MT-ID %d", (u_char) l->m[0].tos_count);
+      zlog_debug ("    metric %d", ntohs (l->m[0].metric));
+
+      for (j = 0; j < l->m[0].tos_count; j++ ) {
+	zlog_debug ("      MT-ID %d Metric: %d", l->m[j+1].type, ntohs (l->m[j+1].metric));
+      }
+
+      link_len = 12 + 4 * l->m[0].tos_count;
+      ll += link_len;
     }
 }
 
@@ -441,19 +453,28 @@ ospf_network_lsa_dump (struct stream *s, u_int16_t length)
 static void
 ospf_summary_lsa_dump (struct stream *s, u_int16_t length)
 {
-  struct summary_lsa *sl;
-  int size;
-  int i;
-
-  sl = (struct summary_lsa *) STREAM_PNT (s);
+  struct summary_lsa *sl = (struct summary_lsa *) STREAM_PNT (s);
 
   zlog_debug ("  Summary-LSA");
   zlog_debug ("    Network Mask %s", inet_ntoa (sl->mask));
 
-  size = ntohs (sl->header.length) - OSPF_LSA_HEADER_SIZE - 4;
-  for (i = 0; size > 0; size -= 4, i++)
-    zlog_debug ("    TOS=%d metric %d", sl->tos,
-	       GET_METRIC (sl->metric));
+  zlog_debug ("    MT-ID=%d metric %d", sl->tos,
+	      GET_METRIC (sl->metric));
+ {
+   struct summary_lsa_mt *slm;
+   int num_mts;
+   int i;
+
+   slm = (struct summary_lsa_mt *)sl;
+
+   num_mts = (ntohs (slm->header.length)
+	      - sizeof ( struct summary_lsa ))
+     / sizeof (struct summary_mt);
+  
+   for (i = 0; i < num_mts; i++)
+     zlog_debug ("    MT-ID=%d metric %d", slm->mt[i].id,
+		 GET_METRIC (slm->mt[i].metric));
+ }
 }
 
 static void
@@ -470,7 +491,7 @@ ospf_as_external_lsa_dump (struct stream *s, u_int16_t length)
   size = ntohs (al->header.length) - OSPF_LSA_HEADER_SIZE -4;
   for (i = 0; size > 0; size -= 12, i++)
     {
-      zlog_debug ("    bit %s TOS=%d metric %d",
+      zlog_debug ("    bit %s MT-ID=%d metric %d",
 		 IS_EXTERNAL_METRIC (al->e[i].tos) ? "E" : "-",
 		 al->e[i].tos & 0x7f, GET_METRIC (al->e[i].metric));
       zlog_debug ("    Forwarding address %s", inet_ntoa (al->e[i].fwd_addr));
